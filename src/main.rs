@@ -1,36 +1,75 @@
 use clap::Parser;
+use std::fmt;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::prelude::*;
 use std::path::PathBuf;
 
+type Result<T, E = Box<dyn std::error::Error + Send + Sync + 'static>> = std::result::Result<T, E>;
+
+#[derive(Debug)]
+struct HumanError(String);
+
+impl HumanError {
+    fn new(error: String) -> Self {
+        Self(error)
+    }
+}
+
+impl fmt::Display for HumanError {
+    fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        write!(formatter, "{}", self.0)
+    }
+}
+
+impl std::error::Error for HumanError {}
+
+/// Replaces \n with newlines
 #[derive(Parser, Debug)]
-struct Cli {
+#[clap(version)]
+struct Args {
+    /// Input file
     #[clap(parse(from_os_str))]
     in_file: PathBuf,
-    #[clap(parse(from_os_str))]
+    /// Output file
+    #[clap(short, long, parse(from_os_str))]
     out_file: Option<PathBuf>,
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Cli::parse();
-    let content = match std::fs::read_to_string(&args.in_file) {
-        Ok(content) => content,
-        Err(error) => return Err(error.into()),
-    };
-    let mut file = create_out_file(args)?;
+fn main() {
+    let args = Args::parse();
 
-    // let display = out_file.display();
-    // println!("file content: {}", content);
-    // println!("file content size: {}", content.lines().count());
-    // println!("file path: {:?}", out_file);
-    // println!("file display: {}", display);
-    write_content(&mut file, content)?;
-    file.sync_data()?;
+    match run(&args) {
+        Err(e) => {
+            println!("{}", e);
+            std::process::exit(1)
+        }
+        _ => std::process::exit(0),
+    }
+}
+
+fn run(args: &Args) -> Result<()> {
+    let content = std::fs::read_to_string(&args.in_file).map_err(|err| {
+        let error = format!("Error when reading '{}': {}", args.in_file.display(), err);
+        HumanError::new(error)
+    })?;
+    let out_path = out_path(args);
+    let mut file = create_out_file(&out_path).map_err(|err| {
+        let error = format!("Error when creating file '{}': {}", out_path.display(), err);
+        HumanError::new(error)
+    })?;
+    write_content(&mut file, content).map_err(|err| {
+        let error = format!("Writing error: {}", err);
+        HumanError::new(error)
+    })?;
+    file.sync_data().map_err(|err| {
+        let error = format!("Cannot sync data with disk: {}", err);
+        HumanError::new(error)
+    })?;
     Ok(())
 }
 
-fn write_content(file: &mut File, content: String) -> std::io::Result<()> {
+fn write_content(file: &mut File, content: String) -> Result<(), std::io::Error> {
     for line in content.lines() {
         let text = line.replace("\\n", "\n");
         writeln!(file, "{}", text)?;
@@ -38,23 +77,24 @@ fn write_content(file: &mut File, content: String) -> std::io::Result<()> {
     Ok(())
 }
 
-fn create_out_file(args: Cli) -> std::io::Result<File> {
-    let path = match args.out_file {
+fn out_path(args: &Args) -> PathBuf {
+    match &args.out_file {
         Some(name) => PathBuf::from(name),
         None => {
             let mut path = PathBuf::from(&args.in_file);
-            args.in_file.file_stem().and_then(|file_name| {
+            args.in_file.file_stem().map(|file_name| {
                 let new_name = format!("{} - copy", file_name.to_str().unwrap_or(""));
                 path.set_file_name(new_name);
-                args.in_file.extension().and_then(|extension| {
-                    path.set_extension(extension);
-                    Some(())
-                });
-                Some(())
+                args.in_file
+                    .extension()
+                    .map(|extension| path.set_extension(extension))
             });
             path
         }
-    };
+    }
+}
+
+fn create_out_file(path: &PathBuf) -> Result<File, std::io::Error> {
     OpenOptions::new()
         .read(true)
         .write(true)
